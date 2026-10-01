@@ -3713,23 +3713,10 @@ class GatewayRunner(
             logger.warning("SQLite session store not available: %s", e)
             self._session_db_init_error = str(e)  # surfaced on the home channel(s) once connected
 
-        # Opportunistic state.db maintenance (prune + optional VACUUM), at most once per min_interval_hours.
-        # A few blocking seconds per day is fine for a long-lived gateway; failures log, never raise.
-        # Surface the failure to the user via their home channel(s) once the gateway connects. Without this,
-        # state.db corruption or NFS/SMB lock failures silently degrade the entire gateway — messages may
-        # flow but nothing is persisted, and the user has no indication until they try /resume and find
-        # nothing (#88235).
-        # Once per SERVED profile, each under its own scope: both the store and the ``sessions:``
-        # config that governs it must be the profile's own. Bound to ``self._session_db`` this ran
-        # against the construction-time launch home only, so a multiplexed secondary profile's
-        # state.db was never pruned or vacuumed by anybody, and the launch profile's
-        # retention_days/auto_prune decided whether it happened at all.
-        from gateway.run_profile_reconcile import _for_each_served_profile
-        _launch_sessions = _launch_sessions_dir(self.config)  # resolved OUTSIDE any profile scope
-        _housekeeping_chore(
-            "state.db startup maintenance",
-            lambda: _for_each_served_profile(
-                self, lambda _label: _housekeeping_state_db_maintenance(_launch_sessions)))
+        # state.db retention/FTS/VACUUM maintenance deliberately does NOT run here. A multi-GB
+        # store can spend minutes scanning or rewriting pages, which kept Type=notify in "activating"
+        # and made a healthy gateway look dead. Periodic housekeeping owns the same due-gated
+        # maintenance after startup; min_interval_hours remains the durable cadence.
         # Checkpoint store pruning is a housekeeping chore (``_housekeeping_checkpoint_prune``), not a
         # constructor step: its ``git gc`` repacks the whole store (tens of seconds on a GB store) and
         # here it ran before the control socket, adapters and the code_sha stamp — so the first
@@ -4808,6 +4795,24 @@ def _drain_restart_safe_cron_deliveries(adapters, loop, runner=None) -> None:
             cron_scheduler.drain_delivery_queue(profile_adapters, loop)
 
 
+def _lower_housekeeping_thread_priority() -> None:
+    """Best-effort Linux priority drop for supervised background housekeeping."""
+    if sys.platform != "linux" or os.environ.get("HERMES_SUPERVISED_CHILD") != "1":
+        return
+    with suppress(Exception):
+        os.nice(10)
+    with suppress(Exception):
+        import shutil
+        import subprocess
+        ionice = shutil.which("ionice")
+        if ionice:
+            subprocess.run(
+                [ionice, "-c3", "-p", str(threading.get_native_id())],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=2, check=False,
+            )
+
+
 def _start_gateway_housekeeping(
     stop_event: threading.Event, adapters=None, loop=None, interval: int = 60, cron_provider=None, runner=None,
     cron_thread=None,
@@ -4815,6 +4820,7 @@ def _start_gateway_housekeeping(
     """Background thread for gateway-only periodic chores (NOT cron). Separate from the cron trigger
     so chores run under any ``CronScheduler`` provider (external scale-to-zero has no 60s loop).
     Cadences are ticks of ``interval``; inner gates own the real cadence."""
+    _lower_housekeeping_thread_priority()
     from gateway.run_delivery_queue_watch import DRAIN_LABEL, DeliveryQueueWatch, wait_for_next_tick
     from gateway.run_profile_reconcile import _mcp_config_reconciler, profile_scoped_chore
     chores: list[tuple[int, str, Any]] = [
@@ -4843,6 +4849,8 @@ def _start_gateway_housekeeping(
         (60, "Curator tick", profile_scoped_chore(runner, _housekeeping_curator)),
         (60, "Sync pull tick", profile_scoped_chore(runner, _housekeeping_skill_sync)),
         (60, "Org sync pull tick", profile_scoped_chore(runner, _housekeeping_org_skill_sync)),
+        # Run from periodic housekeeping, never the READY critical path. The inner state_meta/
+        # min_interval_hours gate owns the durable daily cadence.
         (60, "state.db maintenance tick", profile_scoped_chore(
             runner,
             # Default-bound now, i.e. OUTSIDE any profile scope: this is the launch home's override.
