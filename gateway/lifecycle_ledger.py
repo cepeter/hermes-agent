@@ -264,27 +264,30 @@ def _report_unclean_exit(evidence: Dict[str, Any], home: Optional[Path]) -> None
 
 
 def record_startup(home: Optional[Path] = None) -> Optional[Dict[str, Any]]:
-    """Boot entry point: report any unclean previous exit (evidence dict, also persisted
-    to ``gateway-exit-diag.log`` and logged at WARNING) then claim the sentinel.  Never raises."""
+    """Boot entry point: detect a prior unclean exit, claim THIS process's sentinel
+    immediately, then run the potentially expensive integrity report. Never raises.
+
+    Claim-before-check is load-bearing: a large state.db may spend minutes in
+    PRAGMA quick_check. If a supervisor stops the process during that scan, leaving
+    the previous PID's sentinel in place makes the next start repeat the same scan
+    from zero and can create a permanent restart loop.
+    """
     evidence: Optional[Dict[str, Any]] = None
     try:
         evidence = detect_unclean_exit(home)
-        if evidence is not None:
-            _report_unclean_exit(evidence, home)
     except Exception:
         logger.debug("Unclean-exit detection failed", exc_info=True)
+
     try:
-        claim: Dict[str, Any] = {"phase": "running", "pid": os.getpid(), "start_time": time.time(), "started_at": _now_iso()}
-        # Process birth (psutil), distinct from ``start_time`` (the ledger claim, seconds later once
-        # imports finish): the Windows start attestation binds PIDs to birth time (#110020 review).
+        claim: Dict[str, Any] = {
+            "phase": "running", "pid": os.getpid(), "start_time": time.time(),
+            "started_at": _now_iso(),
+        }
         from hermes_cli.process_identity import _process_create_time
 
         create_time = _process_create_time(os.getpid())
         if create_time is not None:
             claim["create_time"] = create_time
-        # Carry the verdict on the PREVIOUS life on the new sentinel: it is the only
-        # machine-readable copy (/api/status reads it to report an OOM restart).
-        # Scoped to this life — the next clean exit or boot rewrites the sentinel.
         if evidence is not None:
             claim["prior_unclean_exit"] = True
             if evidence.get("suspected_oom"):
@@ -292,6 +295,12 @@ def record_startup(home: Optional[Path] = None) -> Optional[Dict[str, Any]]:
         _write_sentinel(claim, home)
     except Exception:
         logger.debug("Failed to claim lifecycle sentinel", exc_info=True)
+
+    if evidence is not None:
+        try:
+            _report_unclean_exit(evidence, home)
+        except Exception:
+            logger.debug("Unclean-exit report failed", exc_info=True)
     return evidence
 
 

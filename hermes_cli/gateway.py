@@ -3129,6 +3129,21 @@ def _stable_service_working_dir() -> str:
     return str(PROJECT_ROOT)
 
 
+def _systemd_start_timeout_seconds() -> int:
+    """Systemd startup budget, deliberately longer than Hermes's startup-liveness watchdog.
+
+    Type=notify keeps the unit in "activating" until READY=1.  systemd's distribution
+    default is commonly 90s, while Hermes explicitly supports startup phases lasting up
+    to the 300s startup-watchdog window.  Give Hermes time to emit its own diagnostics
+    and restart code instead of having PID 1 kill a healthy-but-slow startup first.
+    """
+    try:
+        from hermes_startup_watchdog import resolve_startup_watchdog_timeout
+        return max(60, int(resolve_startup_watchdog_timeout()) + 30)
+    except Exception:
+        return 330
+
+
 def _systemd_watchdog_seconds(hermes_home: str | Path | None = None) -> int:
     """Resolve the managed-overlay-aware watchdog setting for a service home."""
     override_token = reset_home_override = None
@@ -3290,8 +3305,13 @@ def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) 
 
     watchdog_seconds = _systemd_watchdog_seconds(hermes_home)
     systemd_type, systemd_watchdog_directives = "simple", ""
+    start_timeout: str | int = _systemd_start_timeout_seconds()
     if watchdog_seconds > 0:
         systemd_type, systemd_watchdog_directives = "notify", f"NotifyAccess=main\nWatchdogSec={watchdog_seconds}s\n"
+        # Hermes's startup watchdog is progress-aware: long SQLite integrity checks renew
+        # a phase lease while they advance. A fixed systemd deadline races that mechanism
+        # and can restart the same healthy check forever, so PID 1 waits for READY/exit.
+        start_timeout = "infinity"
     path_entries.extend(_build_user_local_paths(user_home, path_entries))
     path_entries.extend(_build_wsl_interop_paths(path_entries))
     path_entries.extend(["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"])
@@ -3326,6 +3346,7 @@ KillSignal=SIGTERM
 ExecReload=/bin/kill -USR1 $MAINPID
 ExecStop=-{_systemd_command(stop_mark)}
 ExecStopPost=-{_systemd_command(cleanup)}
+TimeoutStartSec={start_timeout}
 TimeoutStopSec={restart_timeout}
 StandardOutput=journal
 StandardError=journal

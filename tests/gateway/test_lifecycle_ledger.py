@@ -145,6 +145,31 @@ def test_record_startup_persists_unclean_report_and_reclaims(tmp_path: Path) -> 
 
 
 
+def test_record_startup_reclaims_sentinel_before_unclean_report(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _write_sentinel(tmp_path, {
+        "phase": "running",
+        "pid": _DEAD_PID,
+        "start_time": 1000.0,
+        "started_at": "2026-07-11T04:30:00+00:00",
+    })
+    import gateway.lifecycle_ledger as ledger
+
+    observed = {}
+
+    def _report(evidence, home):
+        observed.update(_read_sentinel(tmp_path))
+
+    monkeypatch.setattr(ledger, "_report_unclean_exit", _report)
+    evidence = record_startup(home=tmp_path)
+
+    assert evidence is not None
+    assert observed["phase"] == "running"
+    assert observed["pid"] == os.getpid()
+    assert observed["prior_unclean_exit"] is True
+
+
 def test_record_startup_carries_unclean_flags_onto_new_sentinel(
     tmp_path: Path,
 ) -> None:

@@ -78,4 +78,38 @@ async def test_watchdog_sends_ready_heartbeat_and_stopping(monkeypatch):
     assert calls[-1] == "STOPPING=1"
     assert watchdog.unhealthy is False
 
+def test_watchdog_recovers_from_single_late_tick(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setenv("NOTIFY_SOCKET", "/tmp/hermes-test-notify")
+    monkeypatch.setenv("WATCHDOG_USEC", "120000000")
+
+    import gateway.systemd_notify as notify_mod
+
+    monkeypatch.setattr(notify_mod, "notify", lambda message: calls.append(message) or True)
+    watchdog = notify_mod.SystemdWatchdog(lag_tolerance_seconds=1.0, late_tick_limit=3)
+
+    assert watchdog.record_tick(scheduled_at=10.0, now=12.0) is True
+    assert watchdog.unhealthy is False
+    assert "WATCHDOG=1" in calls
+
+    # A timely tick clears the consecutive-late counter.
+    assert watchdog.record_tick(scheduled_at=20.0, now=20.1) is True
+    assert watchdog._consecutive_late_ticks == 0
+
+
+def test_watchdog_fails_closed_after_repeated_late_ticks(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setenv("NOTIFY_SOCKET", "/tmp/hermes-test-notify")
+    monkeypatch.setenv("WATCHDOG_USEC", "120000000")
+
+    import gateway.systemd_notify as notify_mod
+
+    monkeypatch.setattr(notify_mod, "notify", lambda message: calls.append(message) or True)
+    watchdog = notify_mod.SystemdWatchdog(lag_tolerance_seconds=1.0, late_tick_limit=3)
+
+    assert watchdog.record_tick(scheduled_at=10.0, now=12.0) is True
+    assert watchdog.record_tick(scheduled_at=20.0, now=22.0) is True
+    assert watchdog.record_tick(scheduled_at=30.0, now=32.0) is False
+    assert watchdog.unhealthy is True
+    assert any("remained late" in message for message in calls)
 

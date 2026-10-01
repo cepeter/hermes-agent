@@ -39,10 +39,18 @@ def watchdog_interval_seconds() -> float | None:
 class SystemdWatchdog:
     """Feed systemd while the asyncio event loop continues to make progress."""
 
-    def __init__(self, *, config_enabled: bool = True, lag_tolerance_seconds: float | None = None):
+    def __init__(
+        self, *, config_enabled: bool = True, lag_tolerance_seconds: float | None = None,
+        late_tick_limit: int = 3,
+    ):
         self._config_enabled = bool(config_enabled)
         self.interval_seconds = watchdog_interval_seconds()
         self._lag_tolerance_seconds = lag_tolerance_seconds
+        try:
+            self._late_tick_limit = max(1, int(late_tick_limit))
+        except (TypeError, ValueError):
+            self._late_tick_limit = 3
+        self._consecutive_late_ticks = 0
         self._task: asyncio.Task[None] | None = None
         self._unhealthy = self._stopping = self._stopping_notified = False
 
@@ -67,6 +75,7 @@ class SystemdWatchdog:
         except RuntimeError:
             return False
         self._stopping = self._unhealthy = self._stopping_notified = False
+        self._consecutive_late_ticks = 0
         self._task = asyncio.create_task(self._run(), name="hermes-systemd-watchdog")
         return True
 
@@ -83,9 +92,23 @@ class SystemdWatchdog:
         except (TypeError, ValueError):
             lag = float("inf")
         if not math.isfinite(lag) or lag > self._lag_tolerance():
-            self._unhealthy = True
-            notify("STATUS=watchdog unhealthy: event loop progress is late")
-            return False
+            self._consecutive_late_ticks += 1
+            if self._consecutive_late_ticks >= self._late_tick_limit:
+                self._unhealthy = True
+                notify(
+                    "STATUS=watchdog unhealthy: event loop progress remained late "
+                    f"for {self._consecutive_late_ticks} consecutive ticks"
+                )
+                return False
+            # The loop did make progress again.  Feed systemd so a single GC/disk/network
+            # stall does not permanently poison an otherwise recovered gateway.
+            notify(
+                "STATUS=watchdog late tick recovered "
+                f"({self._consecutive_late_ticks}/{self._late_tick_limit})"
+            )
+            notify("WATCHDOG=1")
+            return True
+        self._consecutive_late_ticks = 0
         notify("WATCHDOG=1")
         return True
 

@@ -368,6 +368,42 @@ class TestGatewayRuntimeStatus:
         assert payload["start_time"] != 1000.0, "start_time should be overwritten on restart"
 
 
+    def test_new_incarnation_discards_prior_platform_health(self, tmp_path, monkeypatch):
+        """A new PID must not inherit connected/fatal platform claims from the old gateway."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        state_path = tmp_path / "gateway_state.json"
+        state_path.write_text(json.dumps({
+            "pid": 99999,
+            "start_time": 1000.0,
+            "kind": "hermes-gateway",
+            "gateway_state": "running",
+            "desired_state": "running",
+            "platforms": {
+                "telegram": {
+                    "state": "connected",
+                    "writer_pid": 99999,
+                    "writer_start_time": 1000.0,
+                },
+                "reviewer:discord": {
+                    "state": "fatal",
+                    "writer_pid": 99999,
+                    "writer_start_time": 1000.0,
+                },
+            },
+        }))
+
+        status.write_runtime_status(
+            gateway_state="starting", reload_existing=True, wait_timeout=1.0
+        )
+
+        payload = status.read_runtime_status()
+        assert payload["pid"] == os.getpid()
+        assert payload["gateway_state"] == "starting"
+        assert payload["platforms"] == {}
+        # Durable out-of-process intent is retained by the writer merge.
+        assert payload["desired_state"] == "running"
+
+
     def test_runtime_status_running_pid_rejects_pid_reused_by_other_profile(self, monkeypatch):
         """Regression (user report): a stale profile's recycled PID must not be
         reported running just because it now hosts a DIFFERENT profile's gateway.

@@ -941,6 +941,33 @@ def _build_runtime_status_record() -> dict[str, Any]:
     }
 
 
+def _runtime_status_is_prior_incarnation(
+    record: Optional[dict[str, Any]], current_record: dict[str, Any]
+) -> bool:
+    """True when a persisted runtime snapshot provably belongs to an older process life.
+
+    Legacy snapshots without a PID are merged for backwards compatibility.  Once a PID is
+    present, a different PID or a same-PID/different-start-time record is a previous
+    incarnation: transient platform health must not survive into the new gateway.
+    """
+    if not isinstance(record, dict):
+        return False
+    recorded_pid = record.get("pid")
+    current_pid = current_record.get("pid")
+    if not isinstance(recorded_pid, int) or recorded_pid <= 0:
+        return False
+    if recorded_pid != current_pid:
+        return True
+    recorded_start = record.get("start_time")
+    current_start = current_record.get("start_time")
+    if recorded_start is None or current_start is None:
+        return False
+    try:
+        return not _start_times_agree(recorded_start, current_start)
+    except (TypeError, ValueError):
+        return True
+
+
 def _read_json_file(path: Path, *, bare_pid_ok: bool = False) -> Optional[dict[str, Any]]:
     """JSON object at ``path``, or None when absent/empty/unreadable/invalid. ``bare_pid_ok`` also
     accepts legacy bare-integer PID files as ``{"pid": N}``."""
@@ -1238,15 +1265,20 @@ def _prepare_runtime_status_update(
     global _runtime_status_state_path, _runtime_status_state
     path = _get_runtime_status_path()
     with _runtime_status_state_lock:
+        current_record = _build_pid_record()
         if reload_existing or _runtime_status_state_path != path or _runtime_status_state is None:
             _runtime_status_state_path = path
-            _runtime_status_state = (
-                (_read_json_file(path) if load_existing else None) or _build_runtime_status_record())
+            loaded = _read_json_file(path) if load_existing else None
+            # A new gateway process must never inherit the prior process's live platform
+            # claims.  The on-disk writer still preserves out-of-process durable fields
+            # (for example desired_state) when it overlays this fresh snapshot.
+            if _runtime_status_is_prior_incarnation(loaded, current_record):
+                loaded = None
+            _runtime_status_state = loaded or _build_runtime_status_record()
         # The module snapshot is only ever reassigned (never mutated in place) and
         # submit() copies again, so the previous snapshot can be handed out as-is.
         previous_payload = _runtime_status_state
         payload = copy.deepcopy(previous_payload)
-        current_record = _build_pid_record()
         payload.setdefault("platforms", {})
         if not isinstance(payload["platforms"], dict):
             payload["platforms"] = {}
