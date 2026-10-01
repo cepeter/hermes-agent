@@ -3693,7 +3693,7 @@ class GatewayRunner(
             logger.debug("approvals.mode startup check skipped", exc_info=True)
 
     def _init_session_db(self) -> None:
-        """Open the session DB for the active scope and run opportunistic state.db / checkpoint maintenance."""
+        """Open the session DB for the active scope; heavy maintenance is post-start housekeeping."""
         # Session DB is a property caching one AsyncSessionDB per path (a handle bound here would pin the
         # root home under multiplex); priming here keeps startup diagnostics at init.
         # Initialize session database for session_search tool support. Same frozen-handle class of bug as
