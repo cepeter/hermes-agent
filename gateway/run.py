@@ -1036,11 +1036,10 @@ def build_resume_recovery_note(
     reason: Optional[str], message: str = "", *, interactive: bool = True) -> str:
     """Build the resume-pending recovery system note for an interrupted turn (empty ``message`` = auto-resume).
 
-    Interactive platforms report the restore and ask what next; non-interactive ones finish the work.
-
-    On non-interactive event platforms (webhook, API server — adapters with ``interactive_resume = False``)
-    nobody can answer; the resumed turn must instead complete the interrupted work, or the task is silently
-    abandoned behind a "restored" acknowledgement that goes nowhere (#57056).
+    A crash-left turn is a durable workflow checkpoint: the gateway persisted an active-turn marker and
+    incremental transcript/tool results before the process died. With no new user message, every platform
+    resumes that interrupted work after reconciling recorded effects instead of asking the user what to do.
+    A real new user message still wins and cancels implicit continuation of the old workflow.
     """
     reason_phrase = (
         "a gateway restart" if reason == "restart_timeout"
@@ -1053,20 +1052,24 @@ def build_resume_recovery_note(
         )
     elif interactive:
         resume_guidance = (
-            "Report to the user that the session was restored "
-            "successfully and ask what they would like to do next.")
+            "Briefly tell the user the session was restored and that you are resuming the interrupted work; "
+            "do NOT ask what they would like to do next. Review the conversation history and CONTINUE the "
+            "interrupted task to completion.")
         tail_guidance = (
-            "Do NOT re-execute old tool calls — skip any unfinished work from the conversation history."
-        )
+            "Reconcile before acting: do NOT re-run tool calls whose successful results already appear in "
+            "the history. For a side-effecting action whose completion is uncertain, verify current external "
+            "state first and retry only when that verification shows the action is still pending. Resume from "
+            "the first unresolved step.")
     else:
         resume_guidance = (
-            "No user is present on this non-interactive platform, "
-            "so do NOT emit a 'session restored' acknowledgement "
-            "or ask questions. Review the conversation history and "
-            "CONTINUE the interrupted task to completion.")
+            "No user is present on this non-interactive platform, so do NOT emit a 'session restored' "
+            "acknowledgement or ask questions. Review the conversation history and CONTINUE the interrupted "
+            "task to completion.")
         tail_guidance = (
-            "Do NOT re-run tool calls whose results already "
-            "appear in the history — resume from the first step that has no recorded result.")
+            "Reconcile before acting: do NOT re-run tool calls whose successful results already appear in "
+            "the history. For a side-effecting action whose completion is uncertain, verify current external "
+            "state first and retry only when that verification shows the action is still pending. Resume from "
+            "the first unresolved step.")
     return (
         f"[System note: The previous turn was interrupted by "
         f"{reason_phrase}; the gateway is now back online. "

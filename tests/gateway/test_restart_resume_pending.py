@@ -265,17 +265,25 @@ class TestResumePendingSystemNote:
         )
 
     def test_empty_message_noninteractive_note_continues_task(self):
-        """Non-interactive platforms (webhook, API server): nobody can answer
-        'what next?', so the resumed turn must complete the interrupted work
-        instead of acknowledging (#57056)."""
+        """Non-interactive platforms resume without emitting an acknowledgement."""
         note = build_resume_recovery_note("restart_timeout", "", interactive=False)
-        assert note != build_resume_recovery_note("restart_timeout", "", interactive=True)
         assert "CONTINUE the interrupted task" in note
         assert "ask what they would like to do next" not in note
-        # Must not tell the model to skip the unfinished work it should finish.
-        assert "skip any unfinished work" not in note
-        # But still guards against re-running already-recorded tool calls.
-        assert "already appear in the history" in note
+        assert "Reconcile before acting" in note
+        assert "first unresolved step" in note
+        assert "verify current external state first" in note
+
+    def test_empty_message_interactive_note_reconciles_and_auto_resumes(self):
+        """Telegram-style recovery must continue durable interrupted work instead of asking what next."""
+        note = build_resume_recovery_note("restart_interrupted", "", interactive=True)
+        assert "session was restored" in note
+        assert "resuming the interrupted work" in note
+        assert "do NOT ask what they would like to do next" in note
+        assert "CONTINUE the interrupted task" in note
+        assert "Reconcile before acting" in note
+        assert "successful results already appear in the history" in note
+        assert "verify current external state first" in note
+        assert "first unresolved step" in note
 
 
 
